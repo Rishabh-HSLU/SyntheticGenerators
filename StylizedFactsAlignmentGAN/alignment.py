@@ -33,19 +33,23 @@ def leverage_effect(x: torch.Tensor, horizon: int = 5) -> torch.Tensor:
     )
     return corr.mean()                                      # scalar
 
+
 def cfvc_loss(x: torch.Tensor, windows: list = [5, 10, 20]) -> torch.Tensor:
-    """Frobenius norm between cross-scale vol correlation matrices."""
     vols = []
     for w in windows:
-        rv = x.unfold(1, w, 1).std(dim=-1).mean(dim=2)     # (B, T-w+1)
+        rv = x.unfold(1, w, 1).std(dim=-1).mean(dim=2)  # (B, T-w+1)
         vols.append(rv)
-    # Stack → (B, M, T') then correlation matrix (B, M, M)
-    V = torch.stack(vols, dim=1)                            # (B, M, T')
+
+    # Trim all to shortest length before stacking
+    min_len = min(v.size(1) for v in vols)
+    vols = [v[:, :min_len] for v in vols]
+
+    V = torch.stack(vols, dim=1)  # (B, M, T')
     V = V - V.mean(dim=2, keepdim=True)
     std = V.std(dim=2, keepdim=True) + 1e-8
     V = V / std
-    corr = torch.bmm(V, V.transpose(1, 2)) / V.size(2)     # (B, M, M)
-    return corr.mean(dim=0)                                 # (M, M)
+    corr = torch.bmm(V, V.transpose(1, 2)) / V.size(2)  # (B, M, M)
+    return corr.mean(dim=0)  # (M, M)                            # (M, M)
 
 
 class AlignmentModule(nn.Module):
