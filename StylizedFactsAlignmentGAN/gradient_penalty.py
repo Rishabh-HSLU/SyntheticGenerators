@@ -5,6 +5,7 @@ def gradient_penalty(discriminator, real: torch.Tensor, fake: torch.Tensor, devi
 
     # Random interpolation coefficient
     alpha = torch.rand(B, 1, 1, device=device)
+    fake = fake.detach()
     interpolated = (alpha * real + (1 - alpha) * fake).requires_grad_(True)
 
     # Critic score on interpolated
@@ -16,7 +17,7 @@ def gradient_penalty(discriminator, real: torch.Tensor, fake: torch.Tensor, devi
         inputs=interpolated,
         grad_outputs=torch.ones_like(d_interp),
         create_graph=True,
-        retain_graph=True,
+        retain_graph=False,
     )[0]
 
     grads = grads.view(B, -1)

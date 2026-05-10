@@ -8,17 +8,21 @@ class Generator(nn.Module):
         self.T = T
         self.n_assets = n_assets
 
-
         self.net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, hidden_dim*2),
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.LayerNorm(hidden_dim * 2),
             nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim*2, T*n_assets),
+            nn.Linear(hidden_dim * 2, T * n_assets),
         )
+        self.apply(self._init_weights)
 
-    def forward(self, z:torch.Tensor):
-        out = self.net(z)
-        return out.view(-1, self.T, self.n_assets)
-    
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.normal_(m.weight, 0.0, 0.02)
+            nn.init.zeros_(m.bias)
 
+    def forward(self, z: torch.Tensor):
+        return self.net(z).view(-1, self.T, self.n_assets)
