@@ -1,3 +1,5 @@
+import os
+import json
 import torch
 from generator import Generator
 from discriminator import Discriminator
@@ -24,8 +26,11 @@ def train_sfag(
     lambda4:         float = 1.0,
     patience:        int   = 500,
     clip_grad:       float = 1.0,
+    checkpoint_dir:  str   = "checkpoints/sfag_run",
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
 ):
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
     G = Generator(latent_dim, T, n_assets, hidden_dim).to(device)
     D = Discriminator(T, n_assets, hidden_dim).to(device)
     alignment = AlignmentModule(lambda1=lambda1, lambda2=lambda2,
@@ -51,7 +56,7 @@ def train_sfag(
 
         B = real.size(0)
 
-        # ── critic updates (WGAN-GP: n_critic steps) ──
+        # ── critic updates ──
         for _ in range(n_critic):
             z      = torch.randn(B, latent_dim, device=device)
             fake   = G(z).detach()
@@ -85,10 +90,14 @@ def train_sfag(
             history["loss_G"].append(loss_G.item())
             history["sfag_gap"].append(sfag_gap)
 
+            # Save history every check — survives kernel crashes
+            with open(f'{checkpoint_dir}/history.json', 'w') as f:
+                json.dump(history, f)
+
             if sfag_gap < best_gap:
                 best_gap   = sfag_gap
                 no_improve = 0
-                torch.save(G.state_dict(), "best_G.pt")
+                torch.save(G.state_dict(), f'{checkpoint_dir}/best_G.pt')
             else:
                 no_improve += 1
 
