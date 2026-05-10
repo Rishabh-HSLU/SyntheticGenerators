@@ -13,4 +13,5 @@ dependencies = [
     "scipy>=1.17.1",
     "statsmodels>=0.14.6",
     "torch>=2.11.0",
+    "wandb>=0.26.1",
 ]
