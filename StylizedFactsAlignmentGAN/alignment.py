@@ -37,9 +37,19 @@ def leverage_effect(x: torch.Tensor, horizon: int = 5) -> torch.Tensor:
     """
     Corr(r_t, σ_{t+horizon}) — should be negative for real returns.
     x: (B, T, N_assets) → scalar
+
+    Volatility proxy:
+    - N_assets > 1 : cross-sectional std (unbiased=False to silence dof warning).
+    - N_assets == 1: |r_t| (the cross-sectional std is identically zero for a
+      single asset, which previously made this term contribute nothing — the
+      absolute return is the standard single-series volatility surrogate).
     """
-    r   = x.mean(dim=2)                                     # (B, T)
-    vol = x.var(dim=2).add(1e-8).sqrt()                     # (B, T) — var avoids dof warning
+    r = x.mean(dim=2)                                       # (B, T)
+
+    if x.size(2) > 1:
+        vol = x.var(dim=2, unbiased=False).add(1e-8).sqrt() # (B, T)
+    else:
+        vol = r.abs().add(1e-8)                             # (B, T) — |r_t|
 
     r_t   = r[:,   :-horizon]
     sig_t = vol[:, horizon:]
