@@ -17,7 +17,7 @@ def gradient_penalty(discriminator, real: torch.Tensor, fake: torch.Tensor, devi
         inputs=interpolated,
         grad_outputs=torch.ones_like(d_interp),
         create_graph=True,
-        retain_graph=False,
+        retain_graph=True,
     )[0]
 
     grads = grads.view(B, -1)
