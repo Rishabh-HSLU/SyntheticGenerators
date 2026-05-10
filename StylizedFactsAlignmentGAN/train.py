@@ -28,6 +28,7 @@ def train_sfag(
     patience:        int   = 500,
     clip_grad:       float = 1.0,
     checkpoint_dir:  str   = "checkpoints/sfag_run",
+    resume:          bool  = True,    # auto-resume from <checkpoint_dir>/latest.pt if present
     use_wandb:       bool  = False,
     wandb_plot_every: int  = 1000,   # log a real-vs-fake chart every N gen iters
     breakthrough_delta: float = 0.05,  # event fires when sfag_gap drops by >= this
@@ -43,10 +44,6 @@ def train_sfag(
     alignment = AlignmentModule(lambda1=lambda1, lambda2=lambda2,
                                 lambda3=lambda3, lambda4=lambda4).to(device)
 
-    if use_wandb:
-        wandb.watch(G, log="gradients", log_freq=100)
-        wandb.watch(D, log="gradients", log_freq=100)
-
     opt_G = torch.optim.Adam(G.parameters(), lr=lr, betas=betas)
     opt_D = torch.optim.Adam(D.parameters(), lr=lr, betas=betas)
 
@@ -55,11 +52,33 @@ def train_sfag(
     best_gap      = float("inf")
     prev_sfag_gap = float("inf")
     no_improve    = 0
+    start_iter    = 1
     loss_D        = torch.tensor(0.0, device=device)
     loss_G        = torch.tensor(0.0, device=device)
     history       = {"iter": [], "loss_D": [], "loss_G": [], "sfag_gap": []}
 
-    for gen_iter in range(1, max_gen_iters + 1):
+    # ── Resume from full-state checkpoint if available ──
+    latest_path = f'{checkpoint_dir}/latest.pt'
+    if resume and os.path.exists(latest_path):
+        ckpt = torch.load(latest_path, map_location=device)
+        G.load_state_dict(ckpt['G'])
+        D.load_state_dict(ckpt['D'])
+        opt_G.load_state_dict(ckpt['opt_G'])
+        opt_D.load_state_dict(ckpt['opt_D'])
+        start_iter    = ckpt['gen_iter'] + 1
+        best_gap      = ckpt['best_gap']
+        prev_sfag_gap = ckpt['prev_sfag_gap']
+        no_improve    = ckpt['no_improve']
+        history       = ckpt['history']
+        print(f"Resumed from iter {ckpt['gen_iter']} | best_gap={best_gap:.4f} "
+              f"| {len(history['iter'])} prior checkpoints in history")
+
+    # wandb.watch AFTER any state restore so it tracks the correct weights
+    if use_wandb:
+        wandb.watch(G, log="gradients", log_freq=100)
+        wandb.watch(D, log="gradients", log_freq=100)
+
+    for gen_iter in range(start_iter, max_gen_iters + 1):
         try:
             real = next(data_iter).to(device)
         except StopIteration:
@@ -113,6 +132,21 @@ def train_sfag(
             else:
                 no_improve += 1
 
+            # Full-state snapshot for crash-safe resumption (atomic via rename)
+            tmp_path = f'{latest_path}.tmp'
+            torch.save({
+                'gen_iter':      gen_iter,
+                'G':             G.state_dict(),
+                'D':             D.state_dict(),
+                'opt_G':         opt_G.state_dict(),
+                'opt_D':         opt_D.state_dict(),
+                'best_gap':      best_gap,
+                'prev_sfag_gap': prev_sfag_gap,
+                'no_improve':    no_improve,
+                'history':       history,
+            }, tmp_path)
+            os.replace(tmp_path, latest_path)   # atomic — never leaves a corrupt file
+
             print(f"iter {gen_iter:>6} | loss_D: {loss_D.item():.4f} | "
                   f"loss_G: {loss_G.item():.4f} | sfag_gap: {sfag_gap:.4f} | "
                   f"λ_anneal: {lambda_anneal:.3f}")
@@ -132,7 +166,9 @@ def train_sfag(
                     wandb.log({"Events/Breakthrough": 1.0,
                                "Events/Gap_Drop":     prev_sfag_gap - sfag_gap},
                               step=gen_iter)
-                prev_sfag_gap = sfag_gap
+
+            # update prev_sfag_gap regardless of wandb so resume state is correct
+            prev_sfag_gap = sfag_gap
 
             if no_improve >= patience:
                 print(f"Early stopping at iter {gen_iter} — sfag_gap converged.")
