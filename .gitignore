@@ -1,0 +1,5 @@
+.projects/cache
+.projects/vault
+.env
+.env.local
+data/raw_intraday
