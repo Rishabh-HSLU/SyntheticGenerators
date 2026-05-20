@@ -5,7 +5,7 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
-from early_stopping import EarlyStopping
+from .early_stopping import EarlyStopping
 
 def get_loss(model, y_0, y_T, T, eps=None, t=None, safe_t=1e-2):
     """Compute the SBBTS score-matching loss on Brownian-bridge samples.

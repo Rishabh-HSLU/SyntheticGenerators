@@ -3,3 +3,16 @@
 .env
 .env.local
 data/raw_intraday
+
+# checkpoints and generated outputs
+**/checkpoints/
+ablation_output/
+**/output_data/
+
+# Python caches
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.idea/

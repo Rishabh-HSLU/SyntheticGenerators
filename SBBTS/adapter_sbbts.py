@@ -67,18 +67,26 @@ Adapter:
 
 from __future__ import annotations
 
+import sys
 from math import sqrt
 from pathlib import Path
 
 import numpy as np
 import torch
 
+_SBBTS = Path(__file__).resolve().parent
+_REPO = _SBBTS.parent
+for p in (_SBBTS, _REPO):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
 
 # ---------------------------------------------------------------------------
 # Constants — match run_augmentation.py defaults
 # ---------------------------------------------------------------------------
 
-M_TRAIN    = 500      # windows subsampled for GPU-memory-safe full-batch training
+M_TRAIN          = 500   # windows subsampled for GPU-memory-safe full-batch training
+BENCHMARK_N_PATHS = 200  # canonical benchmark corpus size (matches EvaluationFramework)
 RANDOM_SEED = 42
 T          = 1        # diffusion time horizon (SBBTS convention)
 BETA       = 100      # noise schedule — triggers training_sbbts_dsbm path
@@ -97,7 +105,8 @@ N_EPOCHS   = 1000
 LR         = 1e-3
 PATIENCE   = 15
 DELTA      = 1e-3
-BATCH_SIZE = 128
+# Attention memory ~ batch * nhead * L^2. At L=2520 use 1-2 on 16GB GPUs, 4 on 24GB+.
+BATCH_SIZE = 2
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +118,7 @@ def build_sbbts_tensor(
     M_train:        int = M_TRAIN,
     seed:           int = RANDOM_SEED,
     device:         torch.device | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
+) -> tuple[torch.Tensor, torch.Tensor, np.ndarray, dict]:
     """
     Load canonical windows, subsample, prepend zero initial state,
     and return the SBBTS-format tensor X.
@@ -126,6 +135,7 @@ def build_sbbts_tensor(
     X     : torch.Tensor, shape (M_train, N+1, 1), scaled, on device
     scale : torch.Tensor, shape (1,) or scalar, the SBBTS scale factor
     idx   : np.ndarray of sampled window indices (for reproducibility)
+    meta  : population mean/std of subsampled z-scored windows (for export)
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -166,7 +176,8 @@ def build_sbbts_tensor(
     print(f"Scale                           : {scale.item():.6f}")
     print(f"X std after scaling             : {X.std().item():.6f}")
 
-    return X, scale, idx
+    meta = {"pop_mean": float(sampled.mean()), "pop_std": float(sampled.std())}
+    return X, scale, idx, meta
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +189,9 @@ def train_sbbts(
     scale:          torch.Tensor,
     checkpoint_dir: str | Path = "checkpoints/sbbts_run",
     device:         torch.device | None = None,
+    batch_size:     int | None = None,
+    n_epochs:       int | None = None,
+    allow_cpu:      bool = False,
 ) -> tuple:
     """
     Train the SBBTS ScoreNN model.
@@ -203,6 +217,13 @@ def train_sbbts(
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type != "cuda" and not allow_cpu:
+        raise RuntimeError(
+            "SBBTS training needs a GPU (seq_len=2520). "
+            "Use SBBTS/training_sbbts.ipynb or scripts/train_sbbts.sh on your GPU server."
+        )
+    batch_size = BATCH_SIZE if batch_size is None else batch_size
+    n_epochs = N_EPOCHS if n_epochs is None else n_epochs
 
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -217,8 +238,8 @@ def train_sbbts(
         d, D_MODEL, HIDDEN_DIM, NHEAD, N_LAYERS, N, device=device
     ).to(device)
 
-    print(f"Training SBBTS: beta={BETA}, K={K}, n_epochs={N_EPOCHS}, "
-          f"lr={LR}, batch_size={BATCH_SIZE}, patience={PATIENCE}")
+    print(f"Training SBBTS: beta={BETA}, K={K}, n_epochs={n_epochs}, "
+          f"lr={LR}, batch_size={batch_size}, patience={PATIENCE}")
 
     model, y_0 = training_sbbts_dsbm(
         X,
@@ -227,9 +248,9 @@ def train_sbbts(
         BETA,
         K,
         lr          = LR,
-        n_epochs    = N_EPOCHS,
+        n_epochs    = n_epochs,
         safe_t      = SAFE_T,
-        batch_size  = BATCH_SIZE,
+        batch_size  = batch_size,
         patience    = PATIENCE,
         delta       = DELTA,
     )
@@ -257,8 +278,10 @@ def sample_synthetic(
     model,
     y_0:            torch.Tensor,
     scale:          torch.Tensor,
-    M_simu:         int  = 200,
-    output_path:    str | Path = "sbbts_synthetic.npy",
+    meta:           dict,
+    output_dir:     str | Path,
+    M_simu:         int = BENCHMARK_N_PATHS,
+    output_path:    str | Path | None = None,
     device:         torch.device | None = None,
 ) -> np.ndarray:
     """
@@ -285,6 +308,10 @@ def sample_synthetic(
     synthetic : np.ndarray, shape (M_simu, N, 1)
     """
     from diffusion_dsbm import generate_dsbm
+    try:
+        from data_pipeline.canonical import save_benchmark_corpus as _save_corpus
+    except ImportError:
+        _save_corpus = None
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -319,16 +346,18 @@ def sample_synthetic(
     else:
         synthetic = np.asarray(X_sbb, dtype=np.float32)
 
-    output_path = Path(output_path)
-    np.save(output_path, synthetic)
-
-    print(f"Saved sbbts_synthetic.npy : {synthetic.shape}")
-    print(f"  mean : {synthetic.mean():.6f}")
-    print(f"  std  : {synthetic.std():.6f}")
-    print(f"  min  : {synthetic.min():.4f}")
-    print(f"  max  : {synthetic.max():.4f}")
-
-    return synthetic
+    syn = synthetic[:, :, 0] if synthetic.ndim == 3 else synthetic
+    syn = syn * meta["pop_std"] + meta["pop_mean"]
+    if output_path is None:
+        output_path = Path(output_dir) / "sbbts_synthetic.npy"
+    if _save_corpus is not None:
+        arr = _save_corpus(syn, output_path, output_dir)
+    else:
+        # data_pipeline not installed: save raw (no volatility alignment)
+        arr = syn
+        np.save(output_path, arr[:, :, np.newaxis].astype(np.float32))
+    print(f"Saved {output_path}  mean={arr.mean():.6f}  std={arr.std():.6f}")
+    return arr[:, :, np.newaxis]
 
 
 # ---------------------------------------------------------------------------
@@ -338,8 +367,9 @@ def sample_synthetic(
 def load_and_generate(
     checkpoint_dir: str | Path,
     train_npy_path: str | Path,
-    M_simu:         int  = 200,
-    output_path:    str | Path = "sbbts_synthetic.npy",
+    output_dir:     str | Path,
+    M_simu:         int = BENCHMARK_N_PATHS,
+    output_path:    str | Path | None = None,
     device:         torch.device | None = None,
 ) -> np.ndarray:
     """
@@ -369,13 +399,13 @@ def load_and_generate(
     print(f"Loaded checkpoint from {ckpt_path}")
 
     # Rebuild X for generate_dsbm reference (uses the same subsample)
-    X, scale_recomputed, _ = build_sbbts_tensor(
+    X, scale_recomputed, _, meta = build_sbbts_tensor(
         train_npy_path, M_train=M_TRAIN, seed=RANDOM_SEED, device=device
     )
 
     return sample_synthetic(
-        X, model, y_0, scale, M_simu=M_simu,
-        output_path=output_path, device=device
+        X, model, y_0, scale, meta, output_dir,
+        M_simu=M_simu, output_path=output_path, device=device,
     )
 
 
@@ -390,16 +420,26 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Train SBBTS and generate synthetic financial time series."
     )
-    parser.add_argument("train_npy",       type=str,
-                        help="Path to train_normalized.npy")
-    parser.add_argument("--checkpoint_dir", type=str,
-                        default="checkpoints/sbbts_run")
-    parser.add_argument("--output_path",    type=str,
-                        default="output_data/sbbts_synthetic.npy")
+    parser.add_argument("train_npy", type=str, help="train_normalized.npy")
+    parser.add_argument(
+        "output_dir", type=str, help="data/output_data (benchmark reference)"
+    )
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/sbbts_run")
+    parser.add_argument("--output_path", type=str, default=None)
     parser.add_argument("--M_train",        type=int, default=M_TRAIN)
-    parser.add_argument("--M_simu",         type=int, default=200)
-    parser.add_argument("--load_only",      action="store_true",
-                        help="Skip training, load checkpoint and generate only")
+    parser.add_argument("--M_simu", type=int, default=BENCHMARK_N_PATHS)
+    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--n_epochs", type=int, default=N_EPOCHS)
+    parser.add_argument(
+        "--load_only",
+        action="store_true",
+        help="Skip training, load checkpoint and generate only",
+    )
+    parser.add_argument(
+        "--allow-cpu",
+        action="store_true",
+        help="Smoke tests only; full training needs CUDA",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -407,33 +447,34 @@ if __name__ == "__main__":
 
     if args.load_only:
         load_and_generate(
-            checkpoint_dir = args.checkpoint_dir,
-            train_npy_path = args.train_npy,
-            M_simu         = args.M_simu,
-            output_path    = args.output_path,
-            device         = device,
+            checkpoint_dir=args.checkpoint_dir,
+            train_npy_path=args.train_npy,
+            output_dir=args.output_dir,
+            M_simu=args.M_simu,
+            output_path=args.output_path,
+            device=device,
         )
     else:
-        X, scale, idx = build_sbbts_tensor(
-            train_npy_path = args.train_npy,
-            M_train        = args.M_train,
-            seed           = RANDOM_SEED,
-            device         = device,
+        X, scale, idx, meta = build_sbbts_tensor(
+            train_npy_path=args.train_npy,
+            M_train=args.M_train,
+            seed=RANDOM_SEED,
+            device=device,
         )
 
         model, y_0 = train_sbbts(
-            X              = X,
-            scale          = scale,
-            checkpoint_dir = args.checkpoint_dir,
-            device         = device,
+            X=X,
+            scale=scale,
+            checkpoint_dir=args.checkpoint_dir,
+            device=device,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
+            allow_cpu=args.allow_cpu,
         )
 
         sample_synthetic(
-            X           = X,
-            model       = model,
-            y_0         = y_0,
-            scale       = scale,
-            M_simu      = args.M_simu,
-            output_path = args.output_path,
-            device      = device,
+            X, model, y_0, scale, meta, args.output_dir,
+            M_simu=args.M_simu,
+            output_path=args.output_path,
+            device=device,
         )

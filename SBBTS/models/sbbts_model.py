@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from encoder_only import EncoderOnly
+from .encoder_only import EncoderOnly
 
 def get_timestep_embedding(timesteps, embedding_dim=128):
     """Build sinusoidal time embeddings used by the drift network.

@@ -40,8 +40,8 @@ objects from canonical numpy arrays, leaving all training logic intact.
 
 Design decisions
 ----------------
-- Val split is index-based (first 90% train, last 10% val), not
-  random, so the split is deterministic and reproducible without a seed.
+- Val split is per-ticker: last 10% of each ticker's windows (see
+  data_prep.split_train_val_indices).
 - The Dataset samples with replacement (each __getitem__ draws a random
   window index), so n_per_epoch controls gradient update frequency
   independently of corpus size — same as the original design.
@@ -55,11 +55,18 @@ Design decisions
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
+
+_REPO = Path(__file__).resolve().parents[1]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+from data_pipeline.canonical import BENCHMARK_N_PATHS, save_benchmark_corpus
+from data_pipeline.data_prep import split_train_val_indices
 
 
 # ---------------------------------------------------------------------------
@@ -101,11 +108,12 @@ class CanonicalWindowDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 def build_sfagan_data(
-    train_npy_path: str | Path,
-    val_frac:       float = 0.10,
-    batch_size:     int   = 64,
-    n_per_epoch:    int   = 4000,
-    num_workers:    int   = 0,
+    train_npy_path:   str | Path,
+    labels_npy_path:  str | Path | None = None,
+    val_frac:         float = 0.10,
+    batch_size:       int   = 64,
+    n_per_epoch:      int   = 4000,
+    num_workers:      int   = 0,
 ) -> tuple[DataLoader, torch.Tensor, dict]:
     """
     Load canonical training windows and produce (dataloader, val_real).
@@ -127,18 +135,21 @@ def build_sfagan_data(
     train_npy_path = Path(train_npy_path)
     assert train_npy_path.exists(), f"Not found: {train_npy_path}"
 
-    windows = np.load(train_npy_path)          # (N, T, 1), float32 or float64
-    windows = windows.astype(np.float32)
-    N, T, _ = windows.shape
+    if labels_npy_path is None:
+        labels_npy_path = train_npy_path.parent / "train_ticker_labels.npy"
+    labels_npy_path = Path(labels_npy_path)
+    assert labels_npy_path.exists(), f"Not found: {labels_npy_path}"
 
+    windows = np.load(train_npy_path).astype(np.float32)
+    ticker_labels = np.load(labels_npy_path, allow_pickle=True)
+    assert len(ticker_labels) == len(windows), "window / label count mismatch"
+    N, T, _ = windows.shape
     print(f"Loaded train_normalized.npy : {windows.shape}")
 
-    # --- temporal-style split: first 90% train, last 10% val ---
-    n_val   = max(1, int(N * val_frac))
-    n_train = N - n_val
-
-    train_windows = windows[:n_train]          # (n_train, T, 1)
-    val_windows   = windows[n_train:]          # (n_val,   T, 1)
+    train_idx, val_idx = split_train_val_indices(ticker_labels, val_frac)
+    train_windows = windows[train_idx]
+    val_windows = windows[val_idx]
+    n_train, n_val = len(train_windows), len(val_windows)
 
     print(f"Train windows : {n_train}")
     print(f"Val windows   : {n_val}")
@@ -184,24 +195,32 @@ def build_sfagan_data(
 def sample_synthetic(
     checkpoint_dir:  str | Path,
     meta:            dict,
+    eval_npy_path:   str | Path,
     latent_dim:      int   = 128,
     hidden_dim:      int   = 256,
     n_assets:        int   = 1,
-    M:               int   = 200,
-    output_path:     str | Path = "sfagan_synthetic.npy",
+    M:               int   = BENCHMARK_N_PATHS,
+    output_path:     str | Path | None = None,
     device:          torch.device | None = None,
 ) -> np.ndarray:
     """
     Load the best generator checkpoint and sample M synthetic windows.
 
-    Applies inverse-normalization using corpus population statistics
-    so the output is in deseasonalized-return units, matching
-    eval_deseasonalized.npy for the evaluation framework.
+    Inverse-normalization is done in two steps:
+        1. Undo the training z-score: x = x_normed * pop_std + pop_mean
+           This brings the output back to deseasonalized-normalized space.
+        2. Scale to eval corpus magnitude: multiply by eval_std / train_std.
+           This corrects for the fact that the generator was trained on
+           z-scored data (std ~0.87) but the eval corpus is deseasonalized
+           but NOT normalized (std ~1.67). Without this step the synthetic
+           output would be at the wrong scale, creating an artificial
+           fidelity gap unrelated to generator quality.
 
     Parameters
     ----------
     checkpoint_dir : directory containing best_G.pt (from train_sfag)
     meta           : dict returned by build_sfagan_data
+    eval_npy_path  : path to eval_deseasonalized.npy (benchmark reference dir)
     latent_dim     : must match the value used during training
     hidden_dim     : must match the value used during training
     n_assets       : must match the value used during training (1)
@@ -213,8 +232,7 @@ def sample_synthetic(
     -------
     synthetic : np.ndarray, shape (M, T, 1), deseasonalized returns
     """
-    from generator import Generator   # local import — keeps adapter importable
-                                      # without the full SFAGan package on path
+    from generator import Generator
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -225,6 +243,12 @@ def sample_synthetic(
 
     T = meta["T"]
 
+    eval_npy_path = Path(eval_npy_path)
+    assert eval_npy_path.exists(), f"eval_deseasonalized.npy not found: {eval_npy_path}"
+    output_dir = eval_npy_path.parent
+    if output_path is None:
+        output_path = output_dir / "sfagan_synthetic.npy"
+
     # Load generator
     G = Generator(latent_dim, T, n_assets, hidden_dim).to(device)
     G.load_state_dict(torch.load(best_G_path, map_location=device))
@@ -233,7 +257,7 @@ def sample_synthetic(
     print(f"Loaded generator from {best_G_path}")
     print(f"Sampling {M} synthetic windows of length {T}...")
 
-    # Sample in batches of 32 to avoid OOM on smaller GPUs
+    # Sample in batches of 32 to avoid OOM
     batch_size = 32
     batches    = []
 
@@ -246,21 +270,13 @@ def sample_synthetic(
 
     synthetic_normed = np.concatenate(batches, axis=0)   # (M, T, 1)
 
-    # Inverse-normalize: x_raw = x_normed * pop_std + pop_mean
     pop_mean = meta["pop_mean"]
-    pop_std  = meta["pop_std"]
-    synthetic = synthetic_normed * pop_std + pop_mean    # (M, T, 1)
+    pop_std = meta["pop_std"]
+    synthetic = synthetic_normed * pop_std + pop_mean
 
-    output_path = Path(output_path)
-    np.save(output_path, synthetic.astype(np.float32))
-
-    print(f"Saved sfagan_synthetic.npy : {synthetic.shape}")
-    print(f"  mean : {synthetic.mean():.6f}")
-    print(f"  std  : {synthetic.std():.6f}")
-    print(f"  min  : {synthetic.min():.4f}")
-    print(f"  max  : {synthetic.max():.4f}")
-
-    return synthetic
+    synthetic = save_benchmark_corpus(synthetic, output_path, output_dir)
+    print(f"Saved {output_path}  mean={synthetic.mean():.6f}  std={synthetic.std():.6f}")
+    return synthetic[:, :, np.newaxis]
 
 
 # ---------------------------------------------------------------------------

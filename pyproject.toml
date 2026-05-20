@@ -4,14 +4,29 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=0.100.0",
     "arch>=7.0",
     "discourses>=1.1.4",
+    "evaluationframework",
     "ipykernel>=7.2.0",
     "matplotlib>=3.10.9",
     "numpy>=2.4.4",
     "pandas>=3.0.2",
+    "pyarrow>=24.0.0",
     "scipy>=1.17.1",
+    "scipy-stubs~=1.17.1",
     "statsmodels>=0.14.6",
     "torch>=2.11.0",
     "wandb>=0.26.1",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+docgen = ["cohere>=5.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.uv.sources]
+evaluationframework = { path = "../EvaluationFramework" }

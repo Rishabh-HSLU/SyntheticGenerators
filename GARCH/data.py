@@ -1,8 +1,13 @@
-"""Return-series loaders for GARCH baselines.
+"""Legacy CSV loaders — prefer data_prep + adapter_garch for benchmarks."""
 
-Mirrors the SFAG data API but returns a flat 1-D return array per ticker
-(GARCH operates directly on the time series, not on fixed-length windows).
-"""
+import warnings
+
+warnings.warn(
+    "GARCH.data is legacy (no session/gap cleaning). "
+    "Use data.data_prep and GARCH.adapter_garch instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 import os
 from typing import Dict, List, Optional

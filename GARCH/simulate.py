@@ -25,7 +25,6 @@ def simulate_paths(
             params,
             nobs=horizon,
             initial_value=None,
-            random_state=rng,
         )
         paths[i] = sim["data"].values
 
