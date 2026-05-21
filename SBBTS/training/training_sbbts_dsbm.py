@@ -94,10 +94,10 @@ def training_sbbts_dsbm(X, model, T, beta, K, n_epochs=100, batch_size=32, patie
                 else:
                     h_n = model.tf_encoder(x_0_, training=True)
                     t_0 = torch.zeros(len(x_0_), L - 1, 1, device=device)
-                    y_0_ = x_0_ - 1 / beta * model.get_drift(t_0, x_0_, h_n)  # B, L-1, d
+                    y_0_ = (x_0_ - 1 / beta * model.get_drift(t_0, x_0_, h_n)).detach()
 
                     t_N = torch.ones(len(x_0_), L - 1, 1, device=device) * (T - safe_t)
-                    y_T_ = x_T_ - 1 / beta * model.get_drift(t_N, x_T_, h_n)  # B, L-1, d
+                    y_T_ = (x_T_ - 1 / beta * model.get_drift(t_N, x_T_, h_n)).detach()
 
                 loss = get_loss(model, y_0_, y_T_, T, safe_t=safe_t)
                 optimizer.zero_grad()
@@ -120,10 +120,10 @@ def training_sbbts_dsbm(X, model, T, beta, K, n_epochs=100, batch_size=32, patie
                     else:
                         h_n = model.tf_encoder(x_0_, training=True)
                         t_0 = torch.zeros(len(x_0_), L - 1, 1, device=device)
-                        y_0_ = x_0_ - 1 / beta * model.get_drift(t_0, x_0_, h_n)  # B, L-1, d
+                        y_0_ = (x_0_ - 1 / beta * model.get_drift(t_0, x_0_, h_n)).detach()
 
                         t_N = torch.ones(len(x_0_), L - 1, 1, device=device) * (T - safe_t)
-                        y_T_ = x_T_ - 1 / beta * model.get_drift(t_N, x_T_, h_n)  # B, L-1, d
+                        y_T_ = (x_T_ - 1 / beta * model.get_drift(t_N, x_T_, h_n)).detach()
 
                     loss = get_loss(model, y_0_, y_T_, T, eps, t, safe_t=safe_t)
                     total_loss += loss.item()
