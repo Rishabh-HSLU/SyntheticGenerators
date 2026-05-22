@@ -1,4 +1,5 @@
 import gc
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -38,7 +39,7 @@ def get_loss(model, y_0, y_T, T, eps=None, t=None, safe_t=1e-2):
     return loss.mean()
 
 def training_sbbts_dsbm(X, model, T, beta, K, n_epochs=100, batch_size=32, patience=10, delta=1e-3, safe_t=1e-2,
-                        lr=1e-3):
+                        lr=1e-3, checkpoint_dir=None, scale=None):
     """Train the SBBTS drift network with iterative transport-map refinement.
 
     Args:
@@ -142,6 +143,16 @@ def training_sbbts_dsbm(X, model, T, beta, K, n_epochs=100, batch_size=32, patie
                     f" best epochs = {early_stopping.best_epoch},"
                     f" best val loss = {np.round(early_stopping.best_score, 4)}")
                 break
+
+        # Save checkpoint after each DSBM iteration so a crash never loses all work
+        if checkpoint_dir is not None:
+            ckpt_path = Path(checkpoint_dir) / f"iter_{k+1}.pt"
+            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"model": model.state_dict(), "k": k, "d": X.shape[2], "N": X.shape[1] - 1}
+            if scale is not None:
+                payload["scale"] = scale
+            torch.save(payload, ckpt_path)
+            print(f"  [checkpoint] saved s^{k+1} → {ckpt_path}")
 
     h_n = model.tf_encoder(x_0[:1, :1])
     t_0 = torch.zeros(1, 1, 1, device=device)

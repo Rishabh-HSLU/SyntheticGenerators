@@ -90,7 +90,7 @@ BENCHMARK_N_PATHS = 200  # canonical benchmark corpus size (matches EvaluationFr
 RANDOM_SEED = 42
 T          = 1        # diffusion time horizon (SBBTS convention)
 BETA       = 100      # noise schedule — triggers training_sbbts_dsbm path
-K          = 5        # number of DSBM iterations
+K          = 1        # DSBM iterations: 1 is practical at N=2520 (s^2+ is O(N²) per batch)
 N_PI       = 50       # discretization steps for generation
 SAFE_T     = 1e-2     # numerical stability floor
 
@@ -191,6 +191,7 @@ def train_sbbts(
     device:         torch.device | None = None,
     batch_size:     int | None = None,
     n_epochs:       int | None = None,
+    k:              int | None = None,
     allow_cpu:      bool = False,
 ) -> tuple:
     """
@@ -223,7 +224,8 @@ def train_sbbts(
             "Use SBBTS/training_sbbts.ipynb or scripts/train_sbbts.sh on your GPU server."
         )
     batch_size = BATCH_SIZE if batch_size is None else batch_size
-    n_epochs = N_EPOCHS if n_epochs is None else n_epochs
+    n_epochs   = N_EPOCHS if n_epochs is None else n_epochs
+    k          = K if k is None else k
 
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -238,7 +240,7 @@ def train_sbbts(
         d, D_MODEL, HIDDEN_DIM, NHEAD, N_LAYERS, N, device=device
     ).to(device)
 
-    print(f"Training SBBTS: beta={BETA}, K={K}, n_epochs={n_epochs}, "
+    print(f"Training SBBTS: beta={BETA}, K={k}, n_epochs={n_epochs}, "
           f"lr={LR}, batch_size={batch_size}, patience={PATIENCE}")
 
     model, y_0 = training_sbbts_dsbm(
@@ -246,13 +248,15 @@ def train_sbbts(
         model,
         T,
         BETA,
-        K,
-        lr          = LR,
-        n_epochs    = n_epochs,
-        safe_t      = SAFE_T,
-        batch_size  = batch_size,
-        patience    = PATIENCE,
-        delta       = DELTA,
+        k,
+        lr             = LR,
+        n_epochs       = n_epochs,
+        safe_t         = SAFE_T,
+        batch_size     = batch_size,
+        patience       = PATIENCE,
+        delta          = DELTA,
+        checkpoint_dir = checkpoint_dir,
+        scale          = scale,
     )
 
     # Save model checkpoint
